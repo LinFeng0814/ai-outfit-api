@@ -1,14 +1,15 @@
 /**
  * Vercel Serverless Function
- * 百度图像搜索 API 中转服务
+ * 百度图像搜索 API 中转服务（以图搜图）
  */
 
-// ============ 百度图像搜索配置（硬编码Key）============
+// ============ 百度图像搜索配置 ============
 const BAIDU_CONFIG = {
   API_KEY: 'qSCeWfFt7F1tIDuzSt6ETGLT',
   SECRET_KEY: 'WXTtC2vS2bHneSOJI2PDHaXANrVNsjgt',
   TOKEN_URL: 'https://aip.baidubce.com/oauth/2.0/token',
-  SEARCH_URL: 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/taocan_item_search'
+  // 相同图检索API
+  SEARCH_URL: 'https://aip.baidubce.com/rest/2.0/image-search/v1/product/search'
 };
 
 // 缓存 access_token
@@ -35,7 +36,7 @@ async function getAccessToken() {
   if (data.access_token) {
     cachedToken = data.access_token;
     tokenExpire = Date.now() + (data.expires_in - 86400) * 1000;
-    console.log('[百度] Token获取成功:', cachedToken.substring(0, 20) + '...');
+    console.log('[百度] Token获取成功');
     return cachedToken;
   } else {
     throw new Error('获取 access_token 失败: ' + JSON.stringify(data));
@@ -45,20 +46,27 @@ async function getAccessToken() {
 /**
  * 解析百度返回的商品数据
  */
-function parseProducts(result, type) {
-  if (!result || !result.item_list) return [];
-  return result.item_list.slice(0, 6).map((item, index) => ({
+function parseProducts(result) {
+  if (!result || !result.result) {
+    console.log('[百度] 无搜索结果');
+    return [];
+  }
+  
+  const items = result.result;
+  if (!items || !Array.isArray(items)) return [];
+  
+  return items.slice(0, 6).map((item, index) => ({
     id: `bd_${index}`,
-    title: item.product_name || item.short_name || '商品',
-    price: item.price_info?.price || item.price || '暂无',
-    originalPrice: item.price_info?.original_price || '',
-    platform: item.platform_name || '电商平台',
-    shop: item.shop_name || '店铺',
-    sales: item.sales || '',
-    rating: item.rating || '',
-    img: item.image_url || item.img_url || `https://picsum.photos/seed/clothing-${type}-${index}/200/200`,
-    url: item.detail_url || '',
-    tags: item.tags || []
+    title: item.brief || item.product_name || '相似商品',
+    price: item.price ? (item.price / 100).toFixed(2) : '暂无',
+    originalPrice: '',
+    platform: item.source || '电商平台',
+    shop: item.shop_name || '',
+    sales: '',
+    rating: '',
+    img: item.thumb_url || item.image_url || `https://picsum.photos/seed/search-${index}/200/200`,
+    url: item.page_url || '',
+    tags: []
   }));
 }
 
@@ -66,29 +74,26 @@ function parseProducts(result, type) {
  * Vercel Serverless Function 入口
  */
 export default async function handler(req, res) {
-  // 设置 CORS 头
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // 处理 OPTIONS 预检请求
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // 只接受 POST 请求
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: '只支持 POST 请求' });
   }
 
-  const { keyword, type = 'top' } = req.body || {};
+  const { imageBase64 } = req.body || {};
 
-  if (!keyword) {
-    return res.status(400).json({ success: false, error: 'keyword 不能为空' });
+  if (!imageBase64) {
+    return res.status(400).json({ success: false, error: 'imageBase64 不能为空' });
   }
 
   try {
-    console.log('[百度] 开始搜索:', keyword);
+    console.log('[百度] 开始以图搜图');
 
     // 1. 获取 access_token
     const accessToken = await getAccessToken();
@@ -96,18 +101,17 @@ export default async function handler(req, res) {
     // 2. 调用百度图像搜索 API
     const searchResponse = await fetch(`${BAIDU_CONFIG.SEARCH_URL}?access_token=${accessToken}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: keyword,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        image: imageBase64,
         pn: 0,
         rn: 6
-      })
+      }).toString()
     });
 
     const searchData = await searchResponse.json();
     console.log('[百度] 搜索结果:', JSON.stringify(searchData).substring(0, 500));
 
-    // 3. 检查错误
     if (searchData.error_code) {
       console.error('[百度] API 错误:', searchData.error_msg);
       return res.status(200).json({
@@ -118,14 +122,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4. 解析结果
-    const products = parseProducts(searchData.result || {}, type);
+    const products = parseProducts(searchData);
 
     return res.status(200).json({
       success: true,
-      keyword,
       products,
-      source: 'baidu',
+      source: 'baidu_image',
       total: products.length
     });
 
